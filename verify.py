@@ -402,6 +402,17 @@ def compare(a, b, sname):
 SETS = {}
 
 
+def provenance(paths):
+    """sha256 (first 16 hex) of every weight file, so each result names the exact bytes it judged."""
+    import hashlib
+    out = {}
+    for name, d in paths.items():
+        if d and os.path.isdir(d):
+            out[name] = {os.path.basename(f): hashlib.sha256(open(f, "rb").read()).hexdigest()[:16]
+                         for f in sorted(glob.glob(os.path.join(d, "*.safetensors")))}
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--base", required=True)
@@ -421,7 +432,10 @@ def main():
     for s in ("eval_real", "eval_novel", "val"):
         SETS[s] = load_rows(os.path.join(a.data, f"{s}.jsonl"), a.limit)
     log(f"device {DEV}; eval sets " + ", ".join(f"{k}={len(v)}" for k, v in SETS.items()))
-    report = {"base": a.base, "artifacts": {}, "comparisons": {}, "checks": {}}
+    report = {"base": a.base, "artifacts": {}, "comparisons": {}, "checks": {},
+              "provenance": provenance({"adapter": a.adapter, "merged": a.merged, "nf4": a.quant4,
+                                        "control_adapter": a.control_adapter, "control_merged": a.control_merged})}
+    log("provenance:", json.dumps(report["provenance"]))
     R = report["artifacts"]
     KD = 48  # examples whose full next-token distributions are kept for KL
 
@@ -500,10 +514,13 @@ def main():
         K["B4 merge faithful"] = {"agreement>=0.99": c["output_agreement"] >= 0.99,
                                   "|logp gap|<0.02": abs(c.get("gold_logprob_delta", 1)) < 0.02}
     if "nf4" in R:
-        c = C["merged->nf4/eval_real"]
-        K["B5 4-bit faithful"] = {"agreement>=0.95": c["output_agreement"] >= 0.95,
-                                  "EM drop CI lower > -0.05": c["ci95"][0] > -0.05,
-                                  "KL<0.05": kl.get("KL(merged||nf4)", 1) < 0.05}
+        # v2: the gate covers EVERY eval set. v1 checked eval_real only and passed while
+        # eval_novel dropped 4.7 pt (CI [-7.7, -2.0]) - the flaw v1's report found.
+        K["B5 4-bit faithful"] = {"KL<0.05": kl.get("KL(merged||nf4)", 1) < 0.05}
+        for s in SETS:
+            c = C[f"merged->nf4/{s}"]
+            K["B5 4-bit faithful"][f"{s}: agreement>=0.95"] = c["output_agreement"] >= 0.95
+            K["B5 4-bit faithful"][f"{s}: EM drop CI excludes worse than -3pt"] = c["ci95"][0] > -0.03
     if "control" in R:
         K["control"] = trained("control", "control")
         K["control"]["CHECK DISCRIMINATES (control must NOT be TRAINED)"] = not K["control"]["TRAINED"]

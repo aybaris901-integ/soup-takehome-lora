@@ -26,7 +26,7 @@ def main():
     trace = []
     with open("logs/nvidia_smi_trace.csv") as f:
         r = csv.reader(f)
-        next(r)
+        next(r, None)   # empty trace (no GPU) -> no rows
         for row in r:
             try:
                 trace.append((parse_smi_time(row[0]), float(row[1]), float(row[3])))
@@ -44,8 +44,8 @@ def main():
     for name in ("merge_main", "merge_control"):
         p = f"logs/{name}.log"
         if os.path.exists(p):
-            m = re.search(r"Maximum resident set size \(kbytes\): (\d+)", open(p).read())
-            rss[name] = int(m.group(1)) * 1024 / GiB if m else None
+            m = re.findall(r"Maximum resident set size \(kbytes\): (\d+)", open(p).read())
+            rss[name] = int(m[-1]) * 1024 / GiB if m else None   # last attempt = the one that ran
     pred = json.load(open("results/memory_budget.json")) if os.path.exists("results/memory_budget.json") else {}
     out = {}
     print(f"{'phase':22s} {'seconds':>8s} {'smi peak MiB':>13s} {'smi peak GiB':>13s} {'util% mean':>10s}")
@@ -59,6 +59,15 @@ def main():
                      "nvidia_smi_peak_GiB": peak * 2 ** 20 / GiB, "mean_util_pct": util, "samples": len(pts)}
         print(f"{name:22s} {out[name]['seconds']:8.0f} {peak:13.0f} {out[name]['nvidia_smi_peak_GiB']:13.2f} {util:10.0f}")
     out["soup_reported_peak_GB"] = soup_peak
+    # v2: the caching allocator's own counters, read in the training process itself
+    for name in ("train_main", "train_control"):
+        p = f"results/{name}_cuda_stats.json"
+        if os.path.exists(p):
+            out[f"{name}_cuda_stats"] = json.load(open(p))
+            print(f"{name} allocator:", json.dumps(out[f"{name}_cuda_stats"]))
+    if os.path.exists("results/cuda_context.json"):
+        out["cuda_context"] = json.load(open("results/cuda_context.json"))
+        print("CUDA context:", out["cuda_context"])
     out["merge_host_rss_GiB"] = rss
     if pred:
         out["predicted"] = {"train_torch_alloc_GiB": pred["train"]["total_alloc"] / GiB,
